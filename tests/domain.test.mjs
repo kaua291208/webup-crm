@@ -1,0 +1,15 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {company,phone,parseCSV,password,renderTemplate,uuid} from '../lib/domain.mjs';
+import {validSignature,bodyComponent} from '../lib/integrations.mjs';
+import {checkOrigin,handle} from '../api/index.js';
+import {createHmac} from 'node:crypto';
+test('normalizes Brazilian phones and rejects invalid numbers',()=>{assert.equal(phone('(48) 99999-1234'),'5548999991234');assert.throws(()=>phone('123'));assert.equal(phone(''),null);});
+test('company validation rejects invalid status and normalizes identifiers',()=>{const c=company({name:'Empresa',phone:'48999991234',cnpj:'12.345.678/0001-90',website:'example.com'});assert.equal(c.cnpj,'12345678000190');assert.equal(c.website,'https://example.com/');assert.throws(()=>company({name:'X'}));assert.throws(()=>company({name:'Empresa',status:'hacked'}));assert.throws(()=>company({name:'Empresa',website:'javascript:alert(1)'}));});
+test('CSV supports quoted delimiters, multiline and escaped quotes',()=>{assert.deepEqual(parseCSV('nome;nota\n"A; B";"linha 1\nlinha 2"\nC;"um ""teste"""').rows,[['A; B','linha 1\nlinha 2'],['C','um "teste"']]);assert.throws(()=>parseCSV('nome\n"aberto'));});
+test('password and UUID rules',()=>{assert.throws(()=>password('short'));assert.equal(password('long-password-123'),'long-password-123');assert.throws(()=>uuid('x&delete=true'));});
+test('templates do not evaluate arbitrary code',()=>{assert.equal(renderTemplate('Olá {{nome_empresa}} em {{cidade}}',{name:'Teste',city:'Floripa'}),'Olá Teste em Floripa');});
+test('Meta signature rejects altered and malformed bodies',()=>{const raw='{"a":1}',secret='test-key',signature='sha256='+createHmac('sha256',secret).update(raw).digest('hex');assert.ok(validSignature(raw,signature,secret));assert.equal(validSignature(raw+' ',signature,secret),false);assert.equal(validSignature(raw,'x',secret),false);});
+test('Meta template parameters are ordered and bounded',()=>{const t={components:[{type:'BODY',text:'Olá {{1}}, em {{2}}'}]};assert.equal(bodyComponent(t,{name:'ABC',city:'SP'}).body,'Olá ABC, em SP');assert.throws(()=>bodyComponent({components:[{type:'BODY',text:'{{4}}'}]},{name:'x'}));});
+test('CSRF check fails closed on missing and foreign Origin',()=>{process.env.APP_ORIGIN='https://crm.example.com';assert.throws(()=>checkOrigin(new Request('https://crm.example.com/api/x')));assert.throws(()=>checkOrigin(new Request('https://crm.example.com/api/x',{headers:{Origin:'https://evil.test'}})));checkOrigin(new Request('https://crm.example.com/api/x',{headers:{Origin:'https://crm.example.com'}}));});
+test('anonymous requests cannot read CRM data',async()=>{const r=await handle(new Request('https://crm.example.com/api/companies'));assert.equal(r.status,401);assert.match(await r.text(),/Entre na sua conta/);});
+test('cross-origin writes rejected before database access',async()=>{const r=await handle(new Request('https://crm.example.com/api/companies',{method:'POST',headers:{Origin:'https://evil.test','Content-Type':'application/json'},body:'{}'}));assert.equal(r.status,403);});
