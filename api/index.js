@@ -1,7 +1,13 @@
 import {HttpError,sb,db,rpc,session,setSession,cookies} from '../lib/supabase.mjs';
 import {company,text,password,uuid} from '../lib/domain.mjs';
 import {metaConfigured,approvedTemplates,bodyComponent,sendOne,webhook,searchBusinesses} from '../lib/integrations.mjs';
-export function checkOrigin(req){const expected=process.env.APP_ORIGIN;if(!expected)throw new HttpError(503,'Configure APP_ORIGIN.');if(req.headers.get('origin')!==expected)throw new HttpError(403,'Origem não autorizada.');}
+export function checkOrigin(req){
+ const expected=process.env.APP_ORIGIN;
+ if(!expected)throw new HttpError(503,'Configure APP_ORIGIN.');
+ const allowed=new Set([expected,...(process.env.ALLOWED_ORIGINS||'').split(',').map(v=>v.trim()).filter(Boolean)]);
+ const origin=req.headers.get('origin');
+ if(!origin||!allowed.has(origin)||origin!==new URL(req.url).origin)throw new HttpError(403,'Origem não autorizada.');
+}
 async function input(req){if(!req.headers.get('content-type')?.includes('application/json'))throw new HttpError(415,'Use JSON.');const raw=await req.text();if(raw.length>1048576)throw new HttpError(413,'Requisição muito grande.');try{return JSON.parse(raw);}catch{throw new HttpError(400,'JSON inválido.');}}
 const loginAttempts=new Map();
 function loginRate(email){const key=text(email).toLowerCase(),now=Date.now();const item=loginAttempts.get(key);if(item&&item.until>now){if(item.count>=10)throw new HttpError(429,'Aguarde 15 minutos para tentar novamente.');item.count++;}else loginAttempts.set(key,{count:1,until:now+900000});if(loginAttempts.size>1000)for(const [k,v]of loginAttempts)if(v.until<now)loginAttempts.delete(k);}
@@ -10,6 +16,7 @@ export async function handle(req){
  const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:h});
  try{
  const url=new URL(req.url),path=url.pathname.replace(/^\/api\/?/,'').replace(/\/$/,'');
+ if(path==='health'&&req.method==='GET')return json({status:'ok',version:'0.2.0'});
  if(path==='whatsapp/webhook')return await webhook(req);
  const method=req.method;if(!['GET','POST','PATCH','DELETE'].includes(method))throw new HttpError(405,'Método não permitido.');
  if(method!=='GET')checkOrigin(req);
@@ -47,7 +54,7 @@ export async function handle(req){
  if(path==='auth/password'&&method==='POST'){await sb('/auth/v1/user',{token,method:'PUT',body:{password:password(b.password)}});return json({ok:true});}
  if(path==='companies'&&method==='GET'){
  const offset=Math.max(0,Number(url.searchParams.get('offset'))||0),limit=200;
- return json(await db('companies?select=*&order=created_at.desc&limit='+limit+'&offset='+offset,{token}));
+ return json(await db('companies?select=*&order=created_at.desc,id.desc&limit='+limit+'&offset='+offset,{token}));
  }
  if(path==='companies'&&method==='POST')return json(await db('companies',{token,method:'POST',body:company(b),headers:{Prefer:'return=representation'}}),201);
  if(path.startsWith('companies/')&&['PATCH','DELETE'].includes(method)){
@@ -56,7 +63,10 @@ export async function handle(req){
  if(path==='dashboard'&&method==='GET'){
  return json(await rpc('dashboard_stats',{},token));
  }
- if(path==='consents'&&method==='GET')return json(await db('consents?select=*&order=created_at.desc,id.desc&limit=10000',{token}));
+ if(path==='consents'&&method==='GET'){
+ const offset=Math.max(0,Math.floor(Number(url.searchParams.get('offset'))||0));
+ return json(await db('consents?select=*&order=created_at.desc,id.desc&limit=500&offset='+offset,{token}));
+ }
  if(path==='consents'&&method==='POST'){if(typeof b.granted!=='boolean'||text(b.evidence,2000).length<5)throw new HttpError(400,'Registre a origem e a evidência da autorização.');await db('consents',{token,method:'POST',body:{company_id:uuid(b.company_id),granted:b.granted,evidence:text(b.evidence,2000)}});return json({ok:true});}
  if(path==='interactions'&&method==='GET')return json(await db('interactions?company_id=eq.'+uuid(url.searchParams.get('company_id'))+'&order=created_at.desc&limit=200',{token}));
  if(path==='interactions'&&method==='POST'){if(!text(b.body,4000))throw new HttpError(400,'Escreva a observação.');await db('interactions',{token,method:'POST',body:{company_id:uuid(b.company_id),body:text(b.body,4000)}});return json({ok:true});}
@@ -64,7 +74,7 @@ export async function handle(req){
  if(path==='templates'&&method==='POST'){if(text(b.name).length<2||!text(b.body,4000))throw new HttpError(400,'Preencha nome e mensagem.');return json(await db('templates',{token,method:'POST',headers:{Prefer:'return=representation'},body:{name:text(b.name),body:text(b.body,4000),category:text(b.category)}}),201);}
  if(path.startsWith('templates/')&&['PATCH','DELETE'].includes(method)){const id=uuid(path.split('/')[1]);if(method==='PATCH'&&(text(b.name).length<2||!text(b.body,4000)))throw new HttpError(400,'Preencha nome e mensagem.');await db('templates?id=eq.'+id,{token,method,...(method==='PATCH'?{body:{name:text(b.name),body:text(b.body,4000),category:text(b.category)}}:{})});return json({ok:true});}
  if(path==='import'&&method==='POST'){
- if(!Array.isArray(b.rows)||b.rows.length>500)throw new HttpError(400,'Limite de 500 empresas por importação.');
+ if(!Array.isArray(b.rows)||b.rows.length>25)throw new HttpError(400,'Envie até 25 empresas por requisição.');
  if(!['skip','update','review'].includes(b.mode))throw new HttpError(400,'Escolha como tratar duplicados.');
  const results=[];for(const [index,row]of b.rows.entries()){
  try{
@@ -97,8 +107,9 @@ export async function handle(req){
  if(path==='messages'&&method==='GET'){const campaign=url.searchParams.get('campaign_id'),cid=url.searchParams.get('company_id');return json(await db('messages?order=created_at.desc&limit=500'+(campaign?'&campaign_id=eq.'+uuid(campaign):'')+(cid?'&company_id=eq.'+uuid(cid):''),{token}));}
  if(path==='messages/send'&&method==='POST'){if(b.confirm!==true)throw new HttpError(400,'Confirme o envio.');if(!await rpc('check_rate',{bucket_name:'send',max_hits:100,window_seconds:3600},token))throw new HttpError(429,'Limite de 100 envios por hora.');return json(await sendOne(uuid(b.id),token));}
  if(path==='audit'&&method==='GET')return json(await db('audit_log?order=created_at.desc&limit=100',{token}));
- if(path==='backup'&&method==='GET'){const result={exported_at:new Date().toISOString(),tables:{}};for(const table of ['companies','consents','interactions','templates','campaigns','messages','audit_log']){const rows=[];for(let offset=0;;offset+=500){const batch=await db(table+'?order='+(table==='audit_log'?'id':'created_at')+'.asc&limit=500&offset='+offset,{token});rows.push(...batch);if(batch.length<500)break;}result.tables[table]=rows;}return json(result);}
+ if(path==='backup'&&method==='GET'){const result={exported_at:new Date().toISOString(),tables:{}};for(const table of ['companies','consents','interactions','templates','campaigns','messages','audit_log']){const rows=[];for(let offset=0;;offset+=500){const batch=await db(table+'?order='+(table==='audit_log'?'id.asc':'created_at.asc,id.asc')+'&limit=500&offset='+offset,{token});rows.push(...batch);if(batch.length<500)break;}result.tables[table]=rows;}return json(result);}
  throw new HttpError(404,'Rota não encontrada.');
  }catch(e){return json({error:e instanceof HttpError?e.message:e instanceof TypeError?'Dados inválidos ou serviço indisponível.':e.message||'Erro inesperado.'},e.status||400);}
 }
 export default {fetch:handle};
+
