@@ -30,8 +30,14 @@ export async function handle(req){
  if(path==='auth/register'&&method==='POST'){
  loginRate(b.email);
  if(text(b.email).toLowerCase()!==(process.env.ADMIN_EMAIL||'').toLowerCase())throw new HttpError(403,'Cadastro restrito ao administrador configurado.');
- await sb('/auth/v1/signup?redirect_to='+encodeURIComponent(process.env.APP_ORIGIN),{method:'POST',body:{email:text(b.email),password:password(b.password),data:{name:text(b.name)}}});
- return json({message:'Confira seu e-mail para confirmar o acesso. Se a conta já existe, use a recuperação de senha.'});
+ const result=await sb('/auth/v1/signup?redirect_to='+encodeURIComponent(process.env.APP_ORIGIN),{method:'POST',body:{email:text(b.email).toLowerCase(),password:password(b.password),data:{name:text(b.name)}}});
+ const created=result.user||result;
+ if(Array.isArray(created.identities)&&created.identities.length===0)throw new HttpError(409,'Este e-mail já está cadastrado. Use Entrar ou Esqueci minha senha.');
+ if(result.access_token){
+ if(!await rpc('bind_admin',{},result.access_token))throw new HttpError(403,'Conta sem acesso administrativo.');
+ setSession(h,result,url.origin);return json({ok:true,authenticated:true});
+ }
+ return json({message:'Cadastro recebido. Confirme seu e-mail e depois entre com a senha escolhida.',confirmationRequired:true});
  }
  if(path==='auth/recover'&&method==='POST'){loginRate(b.email);try{await sb('/auth/v1/recover?redirect_to='+encodeURIComponent(process.env.APP_ORIGIN),{method:'POST',body:{email:text(b.email)}});}catch(e){if(e.status===429)throw e;}return json({message:'Se a conta existir, você receberá um link de recuperação.'});}
  if(path==='auth/exchange'&&method==='POST'){

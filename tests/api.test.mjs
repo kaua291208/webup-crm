@@ -11,6 +11,32 @@ function setup(t,fn){
  const previous=global.fetch;global.fetch=fn;t.after(()=>{global.fetch=previous;delete process.env.ALLOWED_ORIGINS;});
 }
 function request(path,body){return new Request(root+'/api/'+path,{method:body?'POST':'GET',headers:{Origin:root,'Content-Type':'application/json',Cookie:'wu_access=access'},...(body?{body:JSON.stringify(body)}:{})});}
+test('new signup shows confirmation without claiming account already exists',async t=>{
+ process.env.ADMIN_EMAIL='signup@example.com';
+ setup(t,async()=>response({id,identities:[{id}]}));
+ const r=await handle(request('auth/register',{email:process.env.ADMIN_EMAIL,password:'StrongPassword123!'}));
+ assert.equal(r.status,200);const body=await r.json();assert.equal(body.confirmationRequired,true);assert.doesNotMatch(body.message,/já existe|já está cadastrado/);
+});
+test('masked duplicate signup returns actionable conflict',async t=>{
+ process.env.ADMIN_EMAIL='duplicate@example.com';setup(t,async()=>response({id,identities:[]}));
+ const r=await handle(request('auth/register',{email:process.env.ADMIN_EMAIL,password:'StrongPassword123!'}));
+ assert.equal(r.status,409);assert.match((await r.json()).error,/Entrar/);
+});
+test('signup with immediate session binds admin and sets cookies',async t=>{
+ process.env.ADMIN_EMAIL='confirmed@example.com';setup(t,async url=>url.includes('/signup')?response({user:{id,identities:[{id}]},access_token:'access',refresh_token:'refresh'}):response(true));
+ const r=await handle(request('auth/register',{email:process.env.ADMIN_EMAIL,password:'StrongPassword123!'}));
+ assert.equal(r.status,200);assert.equal((await r.json()).authenticated,true);assert.equal(r.headers.getSetCookie().length,2);
+});
+test('unconfirmed login explains that signup already succeeded',async t=>{
+ setup(t,async()=>response({error_code:'email_not_confirmed'},400));
+ const r=await handle(request('auth/login',{email:'pending@example.com',password:'StrongPassword123!'}));
+ assert.equal(r.status,400);assert.match((await r.json()).error,/cadastro foi criado/);
+});
+test('upstream outage preserves refresh cookie instead of logging user out',async t=>{
+ setup(t,async()=>response({},503));const h=new Headers();
+ await assert.rejects(session(new Request(root,{headers:{Cookie:'wu_refresh=refresh'}}),h),e=>e.status===503);
+ assert.equal(h.getSetCookie().length,0);
+});
 test('authenticated non-admin cannot access companies',async t=>{
  setup(t,async url=>url.endsWith('/user')?response({id}):response(false));
  const r=await handle(request('companies'));assert.equal(r.status,403);
@@ -71,3 +97,4 @@ test('template preview includes static footer',()=>{
 test('health exposes neither session nor configuration',async()=>{
  const r=await handle(new Request(root+'/api/health'));assert.equal(r.status,200);assert.deepEqual(await r.json(),{status:'ok',version:'0.2.0'});
 });
+
